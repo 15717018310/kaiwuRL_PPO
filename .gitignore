@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pth
+*.pt
+*.ckpt
+*.pkl
+ckpt/
+.vscode/
+.env
+*.log
