@@ -74,7 +74,16 @@ class Algorithm:
         adv      = torch.tensor(adv_np,      dtype=torch.float32).to(self.device)
         ret      = torch.tensor(ret_np,      dtype=torch.float32).to(self.device)
 
+        # 模型前向传播
         logits, values = self.model(obs)
+
+        # 如果模型返回3个值（LSTM模式），提取第二个作为value
+        if isinstance(values, tuple):
+            value_mean, value_std = values  # 双价值网络
+            values = value_mean  # 用mean作为主价值
+        else:
+            value_mean = values
+            value_std = None  # 单价值网络
 
         dist     = torch.distributions.Categorical(logits=logits)
         new_prob = dist.log_prob(act)
@@ -86,8 +95,17 @@ class Algorithm:
         surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv
         policy_loss = -torch.mean(torch.min(surr1, surr2))
 
-        # Value loss
-        value_loss = F.mse_loss(values.squeeze(-1), ret)
+        # Value loss（阶段7：双价值网络）
+        if value_std is not None:
+            # MSE for mean
+            value_mean_loss = F.mse_loss(value_mean.squeeze(-1), ret)
+            # MSE for std: target是prediction error的绝对值
+            residual = torch.abs(value_mean.squeeze(-1) - ret)
+            value_std_loss = F.mse_loss(value_std.squeeze(-1), residual.detach())
+            value_loss = value_mean_loss + 0.1 * value_std_loss
+        else:
+            # 原始单价值损失
+            value_loss = F.mse_loss(values.squeeze(-1), ret)
 
         # 动态 entropy 衰减
         self.var_beta = max(Config.BETA_MIN, Config.BETA_START * (Config.BETA_DECAY ** self.train_step))

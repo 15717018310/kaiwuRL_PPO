@@ -56,7 +56,169 @@ def _closest_organ(organ_list, hero_pos):
     return np.array([dir_x, dir_z, float(np.clip(dist, 0, 1.5))], dtype=np.float32)
 
 
+def _calc_flash_cooldown_stage(flash_cd, max_cd=2000.0):
+    """计算闪现冷却分级 (3维)：[无冷却, 冷却中, 即将就绪]"""
+    if flash_cd <= 0:
+        return np.array([1.0, 0.0, 0.0], dtype=np.float32)  # 无冷却
+    elif flash_cd > max_cd * 0.5:
+        return np.array([0.0, 1.0, 0.0], dtype=np.float32)  # 冷却中
+    else:
+        return np.array([0.0, 0.0, 1.0], dtype=np.float32)  # 即将就绪
+
+
+def _calc_monster_danger_level(min_dist_norm):
+    """计算怪物危险等级 (1维)：根据最小怪物距离"""
+    danger = float(np.clip((0.7 - min_dist_norm) / 0.7, -1.0, 1.0))
+    return np.array([danger], dtype=np.float32)
+
+
+def _calc_treasure_priority(treasure_list, hero_pos):
+    """计算宝箱优先级特征 (4维)：可见宝箱数 + 聚集度 + 分类统计"""
+    if not treasure_list:
+        return np.zeros(4, dtype=np.float32)
+
+    visible_count = float(min(len(treasure_list), 10))
+
+    dists = []
+    for t in treasure_list:
+        p = t["pos"]
+        dx = (p["x"] - hero_pos["x"]) / MAP_SIZE
+        dz = (p["z"] - hero_pos["z"]) / MAP_SIZE
+        dist = float(np.sqrt(dx * dx + dz * dz))
+        dists.append(dist)
+
+    if len(dists) > 1:
+        cluster_degree = float(np.std(dists))
+    else:
+        cluster_degree = 0.0
+    cluster_degree = float(np.clip(cluster_degree, 0, 1.5))
+
+    near_count = sum(1 for d in dists if d < 0.3) / (len(dists) + 1e-6)
+    mid_count = sum(1 for d in dists if 0.3 <= d < 0.6) / (len(dists) + 1e-6)
+
+    return np.array([
+        visible_count / 10.0,
+        cluster_degree,
+        near_count,
+        mid_count,
+    ], dtype=np.float32)
+
+
+def _calc_escape_space(map_info, center_idx=10):
+    """计算逃脱空间评估 (2维)：四周是否有足够逃跑空间"""
+    if map_info is None:
+        return np.zeros(2, dtype=np.float32)
+
+    rows = len(map_info)
+    cols = len(map_info[0]) if rows > 0 else 0
+
+    top_walkable = 0
+    bottom_walkable = 0
+    left_walkable = 0
+    right_walkable = 0
+
+    for r in range(rows):
+        for c in range(cols):
+            if r < 3:
+                top_walkable += int(map_info[r][c] != 0)
+            if r >= rows - 3:
+                bottom_walkable += int(map_info[r][c] != 0)
+            if c < 3:
+                left_walkable += int(map_info[r][c] != 0)
+            if c >= cols - 3:
+                right_walkable += int(map_info[r][c] != 0)
+
+    horizontal_space = float((left_walkable + right_walkable) / (6 * cols + 1e-6))
+    vertical_space = float((top_walkable + bottom_walkable) / (6 * rows + 1e-6))
+
+    return np.array([
+        horizontal_space,
+        vertical_space,
+    ], dtype=np.float32)
+
+
+class HistoryBuffer:
+    """维护过去5步的英雄和怪物位置，用于LSTM时序建模"""
+    def __init__(self, max_len=5):
+        self.max_len = max_len
+        self.hero_positions = []
+        self.monster_positions = []
+
+    def push(self, hero_pos, monster_pos):
+        """记录当前步的位置"""
+        self.hero_positions.append((hero_pos["x"], hero_pos["z"]))
+        self.monster_positions.append((monster_pos["x"], monster_pos["z"]))
+        if len(self.hero_positions) > self.max_len:
+            self.hero_positions.pop(0)
+            self.monster_positions.pop(0)
+
+    def get_history_features(self):
+        """返回历史特征 (16维)"""
+        if len(self.hero_positions) < 2:
+            return np.zeros(16, dtype=np.float32)
+
+        features = []
+
+        if len(self.hero_positions) >= 2:
+            dx = (self.hero_positions[-1][0] - self.hero_positions[-2][0]) / MAP_SIZE
+            dz = (self.hero_positions[-1][1] - self.hero_positions[-2][1]) / MAP_SIZE
+            features.extend([dx, dz])
+        else:
+            features.extend([0.0, 0.0])
+
+        if len(self.monster_positions) >= 2:
+            dx = (self.monster_positions[-1][0] - self.monster_positions[-2][0]) / MAP_SIZE
+            dz = (self.monster_positions[-1][1] - self.monster_positions[-2][1]) / MAP_SIZE
+            features.extend([dx, dz])
+        else:
+            features.extend([0.0, 0.0])
+
+        if len(self.hero_positions) >= 2:
+            v_x = (self.hero_positions[-1][0] - self.hero_positions[-2][0]) / MAP_SIZE
+            v_z = (self.hero_positions[-1][1] - self.hero_positions[-2][1]) / MAP_SIZE
+            features.extend([v_x, v_z])
+        else:
+            features.extend([0.0, 0.0])
+
+        if len(self.monster_positions) >= 2:
+            v_x = (self.monster_positions[-1][0] - self.monster_positions[-2][0]) / MAP_SIZE
+            v_z = (self.monster_positions[-1][1] - self.monster_positions[-2][1]) / MAP_SIZE
+            features.extend([v_x, v_z])
+        else:
+            features.extend([0.0, 0.0])
+
+        if len(self.hero_positions) >= 3:
+            v1_x = (self.hero_positions[-2][0] - self.hero_positions[-3][0]) / MAP_SIZE
+            v1_z = (self.hero_positions[-2][1] - self.hero_positions[-3][1]) / MAP_SIZE
+            v2_x = (self.hero_positions[-1][0] - self.hero_positions[-2][0]) / MAP_SIZE
+            v2_z = (self.hero_positions[-1][1] - self.hero_positions[-2][1]) / MAP_SIZE
+            a_x = v2_x - v1_x
+            a_z = v2_z - v1_z
+            features.extend([a_x, a_z])
+        else:
+            features.extend([0.0, 0.0])
+
+        if len(self.monster_positions) >= 3:
+            v1_x = (self.monster_positions[-2][0] - self.monster_positions[-3][0]) / MAP_SIZE
+            v1_z = (self.monster_positions[-2][1] - self.monster_positions[-3][1]) / MAP_SIZE
+            v2_x = (self.monster_positions[-1][0] - self.monster_positions[-2][0]) / MAP_SIZE
+            v2_z = (self.monster_positions[-1][1] - self.monster_positions[-2][1]) / MAP_SIZE
+            a_x = v2_x - v1_x
+            a_z = v2_z - v1_z
+            features.extend([a_x, a_z])
+        else:
+            features.extend([0.0, 0.0])
+
+        return np.array(features[:16], dtype=np.float32)
+
+    def reset(self):
+        """重置缓冲区"""
+        self.hero_positions.clear()
+        self.monster_positions.clear()
+
+
 class Preprocessor:
+    """特征预处理器，包含特征提取和奖励计算"""
     def __init__(self):
         self.reset()
 
@@ -67,6 +229,7 @@ class Preprocessor:
         self.last_min_treasure_dist = 1.0
         self.last_treasure_count = 0
         self.last_collected_buff = 0
+        self.history_buffer = HistoryBuffer(max_len=5)
 
     def feature_process(self, env_obs, last_action):
         observation = env_obs["observation"]
@@ -78,18 +241,23 @@ class Preprocessor:
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 1000)
 
-        # ===== HERO (4维) =====
         hero = frame_state["heroes"]
         hero_pos = hero["pos"]
 
-        hero_feat = np.array([
+        flash_cd = hero.get("flash_cooldown", 0)
+        buff_time = hero.get("buff_remaining_time", 0)
+        has_buff = 1.0 if buff_time > 0 else 0.0
+
+        hero_feat_base = np.array([
             _norm(hero_pos["x"], MAP_SIZE),
             _norm(hero_pos["z"], MAP_SIZE),
-            _norm(hero.get("flash_cooldown", 0), MAX_FLASH_CD),
-            _norm(hero.get("buff_remaining_time", 0), MAX_BUFF_DURATION),
+            _norm(flash_cd, MAX_FLASH_CD),
+            _norm(buff_time, MAX_BUFF_DURATION),
         ], dtype=np.float32)
 
-        # ===== MONSTER (5维 × 2 = 10维) =====
+        flash_stage = _calc_flash_cooldown_stage(flash_cd, MAX_FLASH_CD)
+        hero_feat = np.concatenate([hero_feat_base, flash_stage, np.array([has_buff], dtype=np.float32)])
+
         monsters = frame_state.get("monsters", [])
         monster_feats = []
         cur_min_monster_dist = 1.0
@@ -116,21 +284,21 @@ class Preprocessor:
             else:
                 monster_feats.append(np.zeros(5, dtype=np.float32))
 
-        # ===== ORGANS =====
+        danger_level = _calc_monster_danger_level(cur_min_monster_dist)
+        monster_count = np.array([min(len(monsters), 2.0) / 2.0], dtype=np.float32)
+
         organs = frame_state.get("organs", [])
         treasure_list = [o for o in organs if o["sub_type"] == 1 and o["status"] == 1]
-        buff_list     = [o for o in organs if o["sub_type"] == 2 and o["status"] == 1]
+        buff_list = [o for o in organs if o["sub_type"] == 2 and o["status"] == 1]
 
-        # ===== TREASURE (3维) =====
-        treasure_feat = _closest_organ(treasure_list, hero_pos)
-        cur_min_treasure_dist = float(treasure_feat[2]) if treasure_list else 1.0
+        treasure_feat_closest = _closest_organ(treasure_list, hero_pos)
+        cur_min_treasure_dist = float(treasure_feat_closest[2]) if treasure_list else 1.0
+        treasure_priority = _calc_treasure_priority(treasure_list, hero_pos)
+        treasure_feat = np.concatenate([treasure_feat_closest, treasure_priority])
 
-        # ===== BUFF (3维) =====
-        # 没有 buff 时才引导去拾取
-        has_buff = hero.get("buff_remaining_time", 0) > 0
-        buff_feat = _closest_organ(buff_list if not has_buff else [], hero_pos)
+        has_buff_flag = hero.get("buff_remaining_time", 0) > 0
+        buff_feat = _closest_organ(buff_list if not has_buff_flag else [], hero_pos)
 
-        # ===== MAP 4×4 (16维) =====
         map_feat = np.zeros(16, dtype=np.float32)
         if map_info is not None:
             rows = len(map_info)
@@ -143,7 +311,32 @@ class Preprocessor:
                         map_feat[idx] = float(map_info[r][c] != 0)
                     idx += 1
 
-        # ===== ACTION MASK (16维) =====
+        horizontal_walkable = 0.0
+        vertical_walkable = 0.0
+        if map_info is not None and len(map_info) > 0:
+            rows = len(map_info)
+            cols = len(map_info[0]) if rows > 0 else 0
+            for r in range(rows):
+                for c in range(3):
+                    horizontal_walkable += float(map_info[r][c] != 0)
+                    if c + (cols - 3) < cols:
+                        horizontal_walkable += float(map_info[r][c + (cols - 3)] != 0)
+            horizontal_walkable /= (6 * rows + 1e-6)
+
+            for c in range(cols):
+                for r in range(3):
+                    vertical_walkable += float(map_info[r][c] != 0)
+                    if r + (rows - 3) < rows:
+                        vertical_walkable += float(map_info[r + (rows - 3)][c] != 0)
+            vertical_walkable /= (6 * cols + 1e-6)
+
+        escape_space = _calc_escape_space(map_info)
+        map_feat_enhanced = np.concatenate([
+            map_feat,
+            np.array([horizontal_walkable, vertical_walkable], dtype=np.float32),
+            escape_space,
+        ])
+
         legal_action = [1] * 16
         if legal_act_raw is not None and isinstance(legal_act_raw, (list, tuple)) and len(legal_act_raw) > 0:
             if isinstance(legal_act_raw[0], bool):
@@ -155,23 +348,29 @@ class Preprocessor:
         if sum(legal_action) == 0:
             legal_action = [1] * 16
 
-        # ===== PROGRESS (2维) =====
         step_norm = _norm(self.step_no, self.max_step)
         progress_feat = np.array([step_norm, 1.0 - step_norm], dtype=np.float32)
 
-        # ===== 拼接 (4+5+5+3+3+16+16+2 = 54维) =====
+        # 记录历史
+        if len(monsters) > 0:
+            monster_pos = monsters[0].get("pos", hero_pos)
+        else:
+            monster_pos = hero_pos
+        self.history_buffer.push(hero_pos, monster_pos)
+
         feature = np.concatenate([
-            hero_feat,                                    # 4
+            hero_feat,                                    # 8
             monster_feats[0],                             # 5
             monster_feats[1],                             # 5
-            treasure_feat,                                # 3
+            danger_level,                                 # 1
+            monster_count,                                # 1
+            treasure_feat,                                # 8
             buff_feat,                                    # 3
-            map_feat,                                     # 16
+            map_feat_enhanced,                            # 20
             np.array(legal_action, dtype=np.float32),    # 16
             progress_feat,                                # 2
-        ])  # = 54
+        ])  # = 80
 
-        # ===== REWARD =====
         reward = self._calc_reward(
             hero, env_info, cur_min_monster_dist, cur_min_treasure_dist,
             last_action
@@ -181,59 +380,45 @@ class Preprocessor:
 
     def _calc_reward(self, hero, env_info, cur_min_monster_dist,
                      cur_min_treasure_dist, last_action):
-        """
-        奖励设计：
-          1. 基础生存
-          2. 怪物距离塑形（越危险越强调远离）
-          3. 危险区域指数惩罚
-          4. 宝箱距离塑形（安全时才鼓励靠近）
-          5. 吃到宝箱
-          6. 拾取 buff
-          7. 闪现策略（危险时奖励，安全时惩罚）
-          8. 怪物加速后额外生存奖励
-        """
-        reward = 0.02  # 基础生存
-
-        # 安全权重 [0,1]，越近怪物越小
+        """计算奖励（10项平衡设计）"""
+        reward = 0.05
         safe_weight = float(np.clip(cur_min_monster_dist / 0.5, 0.0, 1.0))
+        danger_weight = 1.0 - safe_weight
 
-        # === 1. 怪物距离塑形 ===1
         dist_diff = cur_min_monster_dist - self.last_min_monster_dist
-        reward += (0.5 + 0.5 * (1.0 - safe_weight)) * dist_diff
+        reward += (0.5 + 0.5 * danger_weight) * dist_diff
         self.last_min_monster_dist = cur_min_monster_dist
 
-        # === 2. 危险区域指数惩罚 ===
         danger_penalty = float(np.exp(-5.0 * cur_min_monster_dist))
-        reward -= 0.6 * danger_penalty
+        reward -= 0.8 * danger_penalty
 
-        # === 3. 宝箱距离塑形（安全时才鼓励靠近） ===
         treasure_gain = self.last_min_treasure_dist - cur_min_treasure_dist
-        reward += (0.1 + 0.4 * safe_weight) * treasure_gain
+        reward += (0.2 + 0.8 * safe_weight) * treasure_gain
         self.last_min_treasure_dist = cur_min_treasure_dist
 
-        # === 4. 吃到宝箱 ===
         cur_treasure_count = hero.get("treasure_collected_count", 0)
         if cur_treasure_count > self.last_treasure_count:
-            reward += 1.5 * (cur_treasure_count - self.last_treasure_count)
+            reward += 3.0 * (cur_treasure_count - self.last_treasure_count)
         self.last_treasure_count = cur_treasure_count
 
-        # === 5. 拾取 buff（用 env_info 的 collected_buff 更准确） ===
         cur_collected_buff = env_info.get("collected_buff", 0)
         if cur_collected_buff > self.last_collected_buff:
-            reward += 0.5
+            reward += 0.8
         self.last_collected_buff = cur_collected_buff
 
-        # === 6. 闪现策略 ===
         used_flash = (last_action is not None and last_action >= 8)
         if used_flash:
-            reward += 0.6 * (1.0 - safe_weight)   # 危险时用 → 奖励
-            reward -= 0.3 * safe_weight             # 安全时乱用 → 惩罚
+            reward += 1.0 * danger_weight
+            reward -= 0.5 * safe_weight
+            if dist_diff > 0.1:
+                reward += 0.3
 
-        # === 7. 怪物加速后额外生存奖励（鼓励在高压下存活） ===
         monster_speed = env_info.get("monster_speed", 1)
         if monster_speed > 1:
-            reward += 0.01 * monster_speed
+            reward += 0.02 * monster_speed
 
-        # === 8. 防抖裁剪 ===
-        reward = float(np.clip(reward, -2.0, 2.0))
+        if safe_weight > 0.7 and not used_flash:
+            reward += 0.05
+
+        reward = float(np.clip(reward, -2.5, 3.0))
         return reward
