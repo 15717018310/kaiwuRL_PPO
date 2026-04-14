@@ -66,41 +66,86 @@ def _calc_flash_cooldown_stage(flash_cd, max_cd=2000.0):
         return np.array([0.0, 0.0, 1.0], dtype=np.float32)  # 即将就绪
 
 
-def _calc_monster_danger_level(min_dist_norm):
-    """计算怪物危险等级 (1维)：根据最小怪物距离"""
-    danger = float(np.clip((0.7 - min_dist_norm) / 0.7, -1.0, 1.0))
-    return np.array([danger], dtype=np.float32)
+def _calc_monster_danger_level(min_dist_norm, monsters=None, step_no=0, max_step=1000):
+    """计算怪物危险等级（增强版，1维）
+    考虑：距离、速度、加速状态、游戏阶段
+    """
+    # 基础危险度：距离越近越危险
+    base_danger = float(np.exp(-3.0 * min_dist_norm))
+
+    # 速度修正：速度越快越危险
+    speed_factor = 1.0
+    if monsters:
+        max_speed = 1
+        for m in monsters:
+            speed = m.get("speed", 1)
+            max_speed = max(max_speed, speed)
+        speed_factor = 1.0 + 0.3 * (max_speed - 1)
+
+    # 阶段修正：后期更危险（怪物可能加速）
+    stage_factor = 1.0 + 0.2 * (step_no / max(max_step, 1))
+
+    danger_level = base_danger * speed_factor * stage_factor
+    danger_level = float(np.clip(danger_level, 0.0, 1.0))
+
+    return np.array([danger_level], dtype=np.float32)
 
 
-def _calc_treasure_priority(treasure_list, hero_pos):
-    """计算宝箱优先级特征 (4维)：可见宝箱数 + 聚集度 + 分类统计"""
+def _calc_treasure_priority(treasure_list, hero_pos, monsters=None):
+    """计算宝箱优先级特征（增强版，7维）
+    返回：[可见数, 聚集度, 近距离占比, 中距离占比, 最安全宝箱方向x, 最安全宝箱方向z, 安全度]
+    """
     if not treasure_list:
-        return np.zeros(4, dtype=np.float32)
+        return np.zeros(7, dtype=np.float32)
 
     visible_count = float(min(len(treasure_list), 10))
 
-    dists = []
+    # 计算每个宝箱的距离和安全度
+    treasure_info = []
     for t in treasure_list:
         p = t["pos"]
         dx = (p["x"] - hero_pos["x"]) / MAP_SIZE
         dz = (p["z"] - hero_pos["z"]) / MAP_SIZE
         dist = float(np.sqrt(dx * dx + dz * dz))
-        dists.append(dist)
 
-    if len(dists) > 1:
-        cluster_degree = float(np.std(dists))
-    else:
-        cluster_degree = 0.0
+        # 计算安全度：距离所有怪物的最小距离
+        min_monster_dist = 1.0
+        if monsters:
+            for m in monsters:
+                if m.get("pos"):
+                    m_pos = m["pos"]
+                    mdx = (p["x"] - m_pos["x"]) / MAP_SIZE
+                    mdz = (p["z"] - m_pos["z"]) / MAP_SIZE
+                    m_dist = float(np.sqrt(mdx * mdx + mdz * mdz))
+                    min_monster_dist = min(min_monster_dist, m_dist)
+
+        # 收益/风险比
+        safety_score = min_monster_dist / (dist + 0.1)
+        treasure_info.append((dist, dx, dz, safety_score))
+
+    # 聚集度
+    dists = [info[0] for info in treasure_info]
+    cluster_degree = float(np.std(dists)) if len(dists) > 1 else 0.0
     cluster_degree = float(np.clip(cluster_degree, 0, 1.5))
 
+    # 距离分布
     near_count = sum(1 for d in dists if d < 0.3) / (len(dists) + 1e-6)
     mid_count = sum(1 for d in dists if 0.3 <= d < 0.6) / (len(dists) + 1e-6)
+
+    # 最安全的宝箱方向
+    safest = max(treasure_info, key=lambda x: x[3])
+    safe_dir_x = safest[1] / (safest[0] + 1e-6)
+    safe_dir_z = safest[2] / (safest[0] + 1e-6)
+    safe_score = float(np.clip(safest[3], 0, 2.0)) / 2.0
 
     return np.array([
         visible_count / 10.0,
         cluster_degree,
         near_count,
         mid_count,
+        safe_dir_x,
+        safe_dir_z,
+        safe_score,
     ], dtype=np.float32)
 
 
@@ -284,7 +329,7 @@ class Preprocessor:
             else:
                 monster_feats.append(np.zeros(5, dtype=np.float32))
 
-        danger_level = _calc_monster_danger_level(cur_min_monster_dist)
+        danger_level = _calc_monster_danger_level(cur_min_monster_dist, monsters, self.step_no, self.max_step)
         monster_count = np.array([min(len(monsters), 2.0) / 2.0], dtype=np.float32)
 
         organs = frame_state.get("organs", [])
@@ -293,7 +338,7 @@ class Preprocessor:
 
         treasure_feat_closest = _closest_organ(treasure_list, hero_pos)
         cur_min_treasure_dist = float(treasure_feat_closest[2]) if treasure_list else 1.0
-        treasure_priority = _calc_treasure_priority(treasure_list, hero_pos)
+        treasure_priority = _calc_treasure_priority(treasure_list, hero_pos, monsters)
         treasure_feat = np.concatenate([treasure_feat_closest, treasure_priority])
 
         has_buff_flag = hero.get("buff_remaining_time", 0) > 0
@@ -364,12 +409,12 @@ class Preprocessor:
             monster_feats[1],                             # 5
             danger_level,                                 # 1
             monster_count,                                # 1
-            treasure_feat,                                # 8
+            treasure_feat,                                # 11 (更新：从8变为11)
             buff_feat,                                    # 3
             map_feat_enhanced,                            # 20
             np.array(legal_action, dtype=np.float32),    # 16
             progress_feat,                                # 2
-        ])  # = 80
+        ])  # = 83 (更新：从80变为83)
 
         reward = self._calc_reward(
             hero, env_info, cur_min_monster_dist, cur_min_treasure_dist,
@@ -380,45 +425,72 @@ class Preprocessor:
 
     def _calc_reward(self, hero, env_info, cur_min_monster_dist,
                      cur_min_treasure_dist, last_action):
-        """计算奖励（10项平衡设计）"""
-        reward = 0.05
+        """计算奖励（优化权重平衡，添加动态调整）"""
+
+        # 动态权重：根据游戏阶段调整
+        step_ratio = self.step_no / self.max_step
         safe_weight = float(np.clip(cur_min_monster_dist / 0.5, 0.0, 1.0))
         danger_weight = 1.0 - safe_weight
 
+        # 阶段权重
+        if step_ratio < 0.3:  # 早期：探索为主
+            explore_bonus = 1.2
+            survival_bonus = 0.8
+        elif step_ratio < 0.7:  # 中期：平衡
+            explore_bonus = 1.0
+            survival_bonus = 1.0
+        else:  # 后期：生存为主
+            explore_bonus = 0.7
+            survival_bonus = 1.3
+
+        reward = 0.0
+
+        # 1. 基础生存奖励
+        reward += 0.05 * survival_bonus
+
+        # 2. 距离塑形（远离怪物）
         dist_diff = cur_min_monster_dist - self.last_min_monster_dist
-        reward += (0.5 + 0.5 * danger_weight) * dist_diff
+        reward += (0.5 + 0.5 * danger_weight) * dist_diff * survival_bonus
         self.last_min_monster_dist = cur_min_monster_dist
 
+        # 3. 危险惩罚
         danger_penalty = float(np.exp(-5.0 * cur_min_monster_dist))
-        reward -= 0.8 * danger_penalty
+        reward -= 0.8 * danger_penalty * survival_bonus
 
+        # 4. 宝箱接近奖励
         treasure_gain = self.last_min_treasure_dist - cur_min_treasure_dist
-        reward += (0.2 + 0.8 * safe_weight) * treasure_gain
+        reward += (0.2 + 0.8 * safe_weight) * treasure_gain * explore_bonus
         self.last_min_treasure_dist = cur_min_treasure_dist
 
+        # 5. 宝箱收集奖励
         cur_treasure_count = hero.get("treasure_collected_count", 0)
         if cur_treasure_count > self.last_treasure_count:
-            reward += 3.0 * (cur_treasure_count - self.last_treasure_count)
+            reward += 3.0 * (cur_treasure_count - self.last_treasure_count) * explore_bonus
         self.last_treasure_count = cur_treasure_count
 
+        # 6. Buff收集奖励
         cur_collected_buff = env_info.get("collected_buff", 0)
         if cur_collected_buff > self.last_collected_buff:
-            reward += 0.8
+            reward += 0.8 * explore_bonus
         self.last_collected_buff = cur_collected_buff
 
+        # 7. 闪现使用奖励
         used_flash = (last_action is not None and last_action >= 8)
         if used_flash:
-            reward += 1.0 * danger_weight
-            reward -= 0.5 * safe_weight
+            reward += 1.0 * danger_weight - 0.5 * safe_weight
             if dist_diff > 0.1:
-                reward += 0.3
+                reward += 0.3  # 闪现逃脱成功
 
+        # 8. 怪物速度补偿
         monster_speed = env_info.get("monster_speed", 1)
         if monster_speed > 1:
-            reward += 0.02 * monster_speed
+            reward += 0.02 * monster_speed * survival_bonus
 
+        # 9. 安全探索奖励
         if safe_weight > 0.7 and not used_flash:
-            reward += 0.05
+            reward += 0.05 * explore_bonus
 
-        reward = float(np.clip(reward, -2.5, 3.0))
+        # 对称裁剪
+        reward = float(np.clip(reward, -3.0, 3.0))
+
         return reward

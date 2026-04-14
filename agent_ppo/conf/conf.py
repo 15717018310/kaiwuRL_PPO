@@ -4,26 +4,26 @@
 class Config:
 
     # =========================
-    # 特征维度（阶段2优化：54→80维）
-    # hero(8) + monster(12) + treasure(8) + buff(3) + map(20) + legal_action(16) + progress(2) = 80
+    # 特征维度（阶段2优化：54→80→83维）
+    # hero(8) + monster(12) + treasure(11) + buff(3) + map(20) + legal_action(16) + progress(2) = 83
     # =========================
     FEATURES = [
         8,   # hero_enhanced: x, z, flash_cd, buff_time, flash_stage_x3, has_buff_x1 = 4+4
         12,  # monsters_enhanced: monster0(5) + monster1(5) + min_dist_level(1) + count(1)
-        8,   # treasure_enhanced: closest(3) + visible_count(1) + cluster_degree(1) + priority_x3(3)
+        11,  # treasure_enhanced: closest(3) + visible_count(1) + cluster_degree(1) + near_count(1) + mid_count(1) + safe_dir_x(1) + safe_dir_z(1) + safe_score(1) = 3+7
         3,   # buff: dir_x, dir_z, dist (unchanged)
         20,  # map_enhanced: local_grid(16) + horizontal_walkable(1) + vertical_walkable(1) + escape_space_x2(2)
         16,  # legal_action mask
         2,   # progress: step_norm, remaining_norm
     ]
     FEATURE_SPLIT_SHAPE = FEATURES
-    FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)  # 80
+    FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)  # 83
     DIM_OF_OBSERVATION = FEATURE_LEN
 
     # =========================
     # LSTM 时序配置（阶段6优化）
     # =========================
-    USE_LSTM = True                # 启用LSTM时序建模
+    USE_LSTM = False               # ✅ STEP 0.1：暂时禁用LSTM以稳定80维基础
     LSTM_HIDDEN_DIM = 128          # LSTM隐藏维度
     LSTM_NUM_LAYERS = 1            # LSTM层数
     SEQUENCE_LEN = 5               # 历史轨迹长度（5步）

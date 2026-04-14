@@ -66,8 +66,23 @@ def _vec(x):
 # 样本处理（填 next_value + GAE）
 # ================================
 def sample_process(list_sample_data):
+    """填充next_value并计算GAE"""
+    if not list_sample_data:
+        return list_sample_data
+
+    # 填充中间步的next_value
     for i in range(len(list_sample_data) - 1):
         list_sample_data[i].next_value = list_sample_data[i + 1].value
+
+    # 最后一步的next_value处理
+    last_sample = list_sample_data[-1]
+    if _scalar(last_sample.done) > 0.5:  # terminated（被抓）
+        # 终止状态：next_value = 0
+        last_sample.next_value = np.zeros(1, dtype=np.float32)
+    else:  # truncated（超时）
+        # 截断状态：bootstrap当前value
+        last_sample.next_value = last_sample.value
+
     _calc_gae(list_sample_data)
     return list_sample_data
 

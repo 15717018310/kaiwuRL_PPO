@@ -97,12 +97,15 @@ class Algorithm:
 
         # Value loss（阶段7：双价值网络）
         if value_std is not None:
-            # MSE for mean
+            # Mean网络：标准MSE
             value_mean_loss = F.mse_loss(value_mean.squeeze(-1), ret)
-            # MSE for std: target是prediction error的绝对值
-            residual = torch.abs(value_mean.squeeze(-1) - ret)
-            value_std_loss = F.mse_loss(value_std.squeeze(-1), residual.detach())
-            value_loss = value_mean_loss + 0.1 * value_std_loss
+
+            # Std网络：预测TD误差的标准差（更稳定的方法）
+            td_error = torch.abs(value_mean.squeeze(-1).detach() - ret)
+            value_std_loss = F.mse_loss(value_std.squeeze(-1), td_error)
+
+            # 组合损失，std权重降低避免过拟合
+            value_loss = value_mean_loss + 0.05 * value_std_loss
         else:
             # 原始单价值损失
             value_loss = F.mse_loss(values.squeeze(-1), ret)

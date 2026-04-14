@@ -135,50 +135,36 @@ class Agent(BaseAgent):
         """Run model inference, return logits, value, prob.
 
         执行模型推理，返回 logits、value 和动作概率。
+        使用PyTorch进行masked softmax（更稳定）。
         """
         self.model.set_eval_mode()
         obs_tensor = torch.tensor(np.array([feature]), dtype=torch.float32).to(self.device)
+        legal_tensor = torch.tensor(np.array([legal_action]), dtype=torch.float32).to(self.device)
 
         with torch.no_grad():
             logits, value = self.model(obs_tensor, inference=True)
 
+            # 使用PyTorch进行masked softmax（更稳定）
+            masked_logits = logits.clone()
+            masked_logits[legal_tensor == 0] = -1e10
+            prob_tensor = torch.softmax(masked_logits, dim=-1)
+
         logits_np = logits.cpu().numpy()[0]
         value_np = value.cpu().numpy()[0]
+        prob_np = prob_tensor.cpu().numpy()[0]
 
-        # Legal action masked softmax / 合法动作掩码 softmax
-        legal_action_np = np.array(legal_action, dtype=np.float32)
-        prob = self._legal_soft_max(logits_np, legal_action_np)
-
-        return logits_np, value_np, prob
-
-    def _legal_soft_max(self, input_hidden, legal_action):
-        """稳定版 masked softmax，全程 float64 避免精度问题"""
-        logits = np.array(input_hidden, dtype=np.float64)
-        legal  = np.array(legal_action, dtype=np.float64)
-
-        # 非法动作设为极小值
-        logits[legal == 0] = -1e9
-
-        # 数值稳定 softmax
-        logits -= np.max(logits)
-        exp = np.exp(logits)
-        prob = exp / np.sum(exp)
-
-        # 强制归一化，消除浮点累积误差
-        prob = np.clip(prob, 0.0, 1.0)
-        prob /= prob.sum()
-
-        return prob
+        return logits_np, value_np, prob_np
 
     def _legal_sample(self, probs, use_max=False):
         """Sample action from probability distribution.
 
-        按概率分布采样动作。
+        按概率分布采样动作。使用PyTorch Categorical分布（数值更稳定）。
         """
         if use_max:
             return int(np.argmax(probs))
-        # 用 float64 并强制末位补齐，确保 multinomial 不报错
-        p = np.array(probs, dtype=np.float64)
-        p = np.clip(p, 0.0, 1.0)
-        p[-1] = max(0.0, 1.0 - p[:-1].sum())  # 末位补齐到精确 1.0
-        return int(np.random.choice(len(p), p=p))
+
+        # 使用PyTorch的Categorical分布
+        prob_tensor = torch.tensor(probs, dtype=torch.float32)
+        dist = torch.distributions.Categorical(probs=prob_tensor)
+        action = dist.sample()
+        return int(action.item())
