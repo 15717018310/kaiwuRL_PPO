@@ -30,14 +30,17 @@ class Agent(BaseAgent):
         torch.manual_seed(0)
         self.device = device
         self.model = Model(device).to(self.device)
-        self.optimizer = torch.optim.Adam(
-            params=self.model.parameters(),
-            lr=Config.INIT_LEARNING_RATE_START,
-            betas=(0.9, 0.999),
+        self.actor_optimizer = torch.optim.Adam(
+            params=self.model.actor.parameters(),
+            lr=3e-4,
             eps=1e-5,
-            weight_decay=1e-5,
         )
-        self.algorithm = Algorithm(self.model, self.optimizer, self.device, logger, monitor)
+        self.critic_optimizer = torch.optim.Adam(
+            params=self.model.critic.parameters(),
+            lr=1e-3,
+            eps=1e-5,
+        )
+        self.algorithm = Algorithm(self.model, self.actor_optimizer, self.critic_optimizer, self.device, logger, monitor)
         self.preprocessor = Preprocessor()
         self.last_action = -1
         self.logger = logger
@@ -132,28 +135,16 @@ class Agent(BaseAgent):
         return int(action[0])
 
     def _run_model(self, feature, legal_action):
-        """Run model inference, return logits, value, prob.
-
-        执行模型推理，返回 logits、value 和动作概率。
-        使用PyTorch进行masked softmax（更稳定）。
-        """
         self.model.set_eval_mode()
         obs_tensor = torch.tensor(np.array([feature]), dtype=torch.float32).to(self.device)
         legal_tensor = torch.tensor(np.array([legal_action]), dtype=torch.float32).to(self.device)
 
         with torch.no_grad():
-            logits, value = self.model(obs_tensor, inference=True)
-
-            # 使用PyTorch进行masked softmax（更稳定）
+            logits, value = self.model(obs_tensor)
             masked_logits = logits.clone()
             masked_logits[legal_tensor == 0] = -1e10
             prob_tensor = torch.softmax(masked_logits, dim=-1)
-
-        logits_np = logits.cpu().numpy()[0]
-        value_np = value.cpu().numpy()[0]
-        prob_np = prob_tensor.cpu().numpy()[0]
-
-        return logits_np, value_np, prob_np
+        return logits.cpu().numpy()[0], value.cpu().numpy()[0], prob_tensor.cpu().numpy()[0]
 
     def _legal_sample(self, probs, use_max=False):
         """Sample action from probability distribution.

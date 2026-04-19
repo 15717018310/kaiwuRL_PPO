@@ -33,7 +33,7 @@ ActData = create_cls(
 # ================================
 SampleData = create_cls(
     "SampleData",
-    obs=Config.DIM_OF_OBSERVATION,   # 54
+    obs=Config.DIM_OF_OBSERVATION,   # 124
     legal_action=Config.ACTION_NUM,  # 16
     act=1,
     reward=Config.VALUE_NUM,
