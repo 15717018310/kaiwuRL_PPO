@@ -19,7 +19,8 @@
       "Bash(sort -k5 -h -r)",
       "Bash(sort -t- -k3 -n)",
       "Bash(xargs wc *)",
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "Bash(git push *)"
     ]
   }
 }
