@@ -2,7 +2,24 @@
   "permissions": {
     "allow": [
       "Bash(pip show *)",
-      "Bash(python -c \"import kaiwudrl; print\\(kaiwudrl.__file__\\)\")"
+      "Bash(python -c \"import kaiwudrl; print\\(kaiwudrl.__file__\\)\")",
+      "Bash(xargs grep *)",
+      "Bash(python *)",
+      "Bash(docker-compose -f .docker-compose.yaml --profile distributed up -d)",
+      "Bash(docker-compose -f .docker-compose.yaml ps)",
+      "Bash(docker-compose -f .docker-compose.yaml logs learner)",
+      "Bash(docker-compose -f .docker-compose.yaml down)",
+      "Bash(docker-compose -f .docker-compose.yaml down -v)",
+      "Bash(docker network *)",
+      "Bash(awk '{print $1}')",
+      "Bash(xargs -r docker rm -f)",
+      "WebSearch",
+      "WebFetch(domain:aiarena.tencent.com)",
+      "Bash(xargs -I{} cat {})",
+      "Bash(sort -k5 -h -r)",
+      "Bash(sort -t- -k3 -n)",
+      "Bash(xargs wc *)",
+      "Bash(python3 *)"
     ]
   }
 }

@@ -126,30 +126,31 @@ class EpisodeRunner:
                 if done:
                     env_info = env_obs["observation"]["env_info"]
                     finished_steps = env_info.get("finished_steps", step)
-                    max_step = env_info.get("max_step", 1000)
+                    max_step = env_info.get("max_step", 1200)
 
                     if terminated:
-                        # 被抓：惩罚，但存活越久惩罚越小
                         survival_ratio = finished_steps / max(max_step, 1)
-                        final_reward[0] = -3.0 + (survival_ratio * 3.0)
-                        # buff 未捡惩罚
-                        uncollected = env_info.get("total_buff", 2) - env_info.get("collected_buff", 0)
-                        if uncollected > 0:
-                            final_reward[0] -= 2.0
+                        final_reward[0] = (-0.5 + survival_ratio * 2.0) * 0.1
                         result_str = "FAIL"
                     else:
-                        # 存活到最大步数：奖励，宝箱越多奖励越大
-                        final_reward[0] = 5.0 + (env_info.get("treasures_collected", 0) * 0.5) + (env_info.get("collected_buff", 0) * 1.0)
+                        treasures = env_info.get("treasures_collected", 0)
+                        buffs = env_info.get("collected_buff", 0)
+                        final_reward[0] = (3.0 + treasures * 0.5 + buffs * 1.0) * 0.1
                         result_str = "WIN"
 
                     sim_score = env_info.get("total_score", 0)
                     collected_buff = env_info.get("collected_buff", 0)
                     treasures_collected = env_info.get("treasures_collected", 0)
+                    speedup_step = env_info.get("monster_speedup", 500)
+                    pre_steps = min(step, speedup_step)
+                    post_steps = max(0, step - speedup_step)
                     self.logger.info(
                         f"[GAMEOVER] episode:{self.episode_cnt} steps:{step} "
                         f"result:{result_str} sim_score:{sim_score:.1f} "
                         f"treasures:{treasures_collected} buffs:{collected_buff} "
-                        f"total_reward:{total_reward:.3f}"
+                        f"total_reward:{total_reward:.3f} "
+                        f"pre_steps:{pre_steps} post_steps:{post_steps} "
+                        f"flash_count:{env_info.get('flash_count', 0)}"
                     )
 
                 # Build sample frame / 构造样本帧
@@ -158,7 +159,7 @@ class EpisodeRunner:
                     legal_action=np.array(obs_data.legal_action, dtype=np.float32),
                     act=np.array([act_data.action[0]], dtype=np.float32),
                     reward=reward,
-                    done=np.array([float(done)], dtype=np.float32),
+                    done=np.array([float(terminated)], dtype=np.float32),
                     reward_sum=np.zeros(1, dtype=np.float32),
                     value=np.array(act_data.value, dtype=np.float32).flatten()[:1],
                     next_value=np.zeros(1, dtype=np.float32),

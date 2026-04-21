@@ -33,7 +33,7 @@ ActData = create_cls(
 # ================================
 SampleData = create_cls(
     "SampleData",
-    obs=Config.DIM_OF_OBSERVATION,   # 124
+    obs=Config.DIM_OF_OBSERVATION,   # 1819
     legal_action=Config.ACTION_NUM,  # 16
     act=1,
     reward=Config.VALUE_NUM,
@@ -99,12 +99,9 @@ def _calc_gae(list_sample_data):
         next_value = _scalar(sample.next_value)
         done       = _scalar(sample.done)
 
-        if done:
-            delta = reward - value
-        else:
-            delta = reward + gamma * next_value - value
-
-        gae = gae * gamma * lamda + delta
+        delta = reward + gamma * next_value - value
+        mask = 1.0 - done
+        gae = mask * gae * gamma * lamda + delta
 
         sample.advantage  = np.array([gae],           dtype=np.float32)
         sample.reward_sum = np.array([gae + value],   dtype=np.float32)

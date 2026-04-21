@@ -16,10 +16,9 @@ def _to_numpy(x):
 
 
 class Algorithm:
-    def __init__(self, model, actor_optimizer, critic_optimizer, device, logger, monitor):
+    def __init__(self, model, optimizer, device, logger, monitor):
         self.model = model
-        self.actor_optimizer = actor_optimizer
-        self.critic_optimizer = critic_optimizer
+        self.optimizer = optimizer
         self.device = device
         self.logger = logger
         self.monitor = monitor
@@ -28,6 +27,9 @@ class Algorithm:
         self.clip_param = Config.CLIP_PARAM
         self.vf_coef = Config.VF_COEF
         self.var_beta = Config.BETA_START
+
+        self.lr_start = Config.INIT_LEARNING_RATE_START
+        self.lr_end = self.lr_start * 0.1
 
         self.sample_buffer = []
         self.min_batch_size = 256
@@ -46,6 +48,7 @@ class Algorithm:
         adv      = np.array([float(_to_numpy(s.advantage).flat[0]) for s in buffered], dtype=np.float32)
         ret      = np.array([float(_to_numpy(s.reward_sum).flat[0]) for s in buffered], dtype=np.float32)
         legal    = np.stack([_to_numpy(s.legal_action).flatten() for s in buffered]).astype(np.float32)
+        old_val  = np.array([float(_to_numpy(s.value).flat[0]) for s in buffered], dtype=np.float32)
 
         adv_raw_mean = adv.mean()
         adv_raw_std = adv.std()
@@ -55,7 +58,7 @@ class Algorithm:
 
         result = None
         for _ in range(Config.PPO_EPOCHS):
-            result = self._update(obs, act, old_prob, adv, ret, legal, adv_raw_mean, adv_raw_std)
+            result = self._update(obs, act, old_prob, adv, ret, legal, old_val, adv_raw_mean, adv_raw_std)
 
         self.train_step += 1
 
@@ -72,13 +75,14 @@ class Algorithm:
 
         return result
 
-    def _update(self, obs_np, act_np, old_prob_np, adv_np, ret_np, legal_np, adv_raw_mean, adv_raw_std):
+    def _update(self, obs_np, act_np, old_prob_np, adv_np, ret_np, legal_np, old_val_np, adv_raw_mean, adv_raw_std):
         obs      = torch.tensor(obs_np, dtype=torch.float32).to(self.device)
         act      = torch.tensor(act_np, dtype=torch.long).to(self.device)
         old_prob = torch.tensor(old_prob_np, dtype=torch.float32).to(self.device)
         adv      = torch.tensor(adv_np, dtype=torch.float32).to(self.device)
         ret      = torch.tensor(ret_np, dtype=torch.float32).to(self.device)
         legal    = torch.tensor(legal_np, dtype=torch.float32).to(self.device)
+        old_val  = torch.tensor(old_val_np, dtype=torch.float32).to(self.device)
 
         logits, value = self.model(obs)
 
@@ -94,8 +98,12 @@ class Algorithm:
         surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv
         policy_loss = -torch.mean(torch.min(surr1, surr2))
 
-        # Value loss
-        value_loss = F.mse_loss(value.squeeze(-1), ret)
+        # Value loss (clipped)
+        value_pred = value.squeeze(-1)
+        value_clipped = old_val + torch.clamp(value_pred - old_val, -self.clip_param, self.clip_param)
+        vf_loss1 = (value_pred - ret) ** 2
+        vf_loss2 = (value_clipped - ret) ** 2
+        value_loss = 0.5 * torch.mean(torch.max(vf_loss1, vf_loss2))
 
         # Debug
         if self.train_step % 100 == 0:
@@ -107,24 +115,21 @@ class Algorithm:
         self.var_beta = max(Config.BETA_MIN, Config.BETA_START * (Config.BETA_DECAY ** self.train_step))
         entropy_loss = -self.var_beta * entropy
 
-        # Actor update
-        actor_loss = policy_loss + entropy_loss
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward(retain_graph=True)
-        torch.nn.utils.clip_grad_norm_(self.model.actor.parameters(), Config.GRAD_CLIP_RANGE)
-        self.actor_optimizer.step()
+        # Learning rate decay
+        decay = max(0.0, 1.0 - self.train_step / 50000.0)
+        lr = self.lr_end + (self.lr_start - self.lr_end) * decay
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
 
-        # Critic update
-        critic_loss = self.vf_coef * value_loss
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.critic.parameters(), Config.GRAD_CLIP_RANGE)
-        self.critic_optimizer.step()
-
-        total_loss = actor_loss.item() + critic_loss.item()
+        # Combined update
+        total_loss = policy_loss + entropy_loss + self.vf_coef * value_loss
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), Config.GRAD_CLIP_RANGE)
+        self.optimizer.step()
 
         return {
-            "total_loss":  total_loss,
+            "total_loss":  total_loss.item(),
             "policy_loss": policy_loss.item(),
             "value_loss":  value_loss.item(),
             "entropy":     entropy.item(),

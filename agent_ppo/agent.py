@@ -30,17 +30,12 @@ class Agent(BaseAgent):
         torch.manual_seed(0)
         self.device = device
         self.model = Model(device).to(self.device)
-        self.actor_optimizer = torch.optim.Adam(
-            params=self.model.actor.parameters(),
+        self.optimizer = torch.optim.Adam(
+            params=self.model.parameters(),
             lr=3e-4,
             eps=1e-5,
         )
-        self.critic_optimizer = torch.optim.Adam(
-            params=self.model.critic.parameters(),
-            lr=1e-3,
-            eps=1e-5,
-        )
-        self.algorithm = Algorithm(self.model, self.actor_optimizer, self.critic_optimizer, self.device, logger, monitor)
+        self.algorithm = Algorithm(self.model, self.optimizer, self.device, logger, monitor)
         self.preprocessor = Preprocessor()
         self.last_action = -1
         self.logger = logger
